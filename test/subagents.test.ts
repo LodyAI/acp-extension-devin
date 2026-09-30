@@ -362,6 +362,33 @@ describe("run_subagent lifecycle", () => {
     });
   });
 
+  it("keeps a background auto-denied tool failure as run output, not root", () => {
+    const proxy = makeProxy();
+    initialize(proxy);
+    newSession(proxy);
+    liveChild(proxy, "agent-bg");
+
+    // background agents get approval-requiring tools denied without a
+    // permission request; the failed update still belongs to the run
+    const denied = proxy.handleRuntime(
+      toolUpdate(
+        "call_denied",
+        "tool_call_update",
+        { ...childCtx("agent-bg") },
+        { status: "failed" },
+      ),
+    );
+    const evts = eventsOf(denied);
+    expect(evts).toHaveLength(1);
+    expect(isLodySubagentEvent(evts[0])).toBe(true);
+    expect(evts[0]).toMatchObject({
+      type: "output",
+      runId: "run-1",
+      update: { sessionUpdate: "tool_call_update", status: "failed" },
+    });
+    expect(rootUpdatesOf(denied)).toEqual([]);
+  });
+
   it("gives a reused agentId a new run after termination", () => {
     const proxy = makeProxy();
     initialize(proxy);
@@ -788,6 +815,125 @@ describe("permission mirroring", () => {
       params: {
         sessionId: SESSION,
         toolCall: { toolCallId: "functions.exec:9#nope" },
+        options: [],
+      },
+    };
+    expect(proxy.handleRuntime(perm).toClient).toEqual([perm]);
+  });
+
+  it("rewrites a sidekick perm for an sk::exec id when the request has no meta", () => {
+    const proxy = makeProxy();
+    initialize(proxy);
+    newSession(proxy);
+    // the tool_call carried the sidekick flag; the permission request does not
+    proxy.handleRuntime(skTool("sk::exec:0#abc123"));
+    const perm = {
+      jsonrpc: "2.0",
+      id: 62,
+      method: "session/request_permission",
+      params: {
+        sessionId: SESSION,
+        toolCall: {
+          toolCallId: "sk::exec:0#abc123",
+          title: "Run command",
+          _meta: { "cognition.ai/editableCommand": "ls" },
+        },
+        options: [{ optionId: "allow" }],
+      },
+    };
+    const out = proxy.handleRuntime(perm);
+    const fwd = out.toClient[0] as typeof perm;
+    expect(fwd.params.toolCall.toolCallId).toBe(
+      `subagent:${encodeURIComponent("run-1")}:${encodeURIComponent("sk::exec:0#abc123")}`,
+    );
+    expect(fwd.params).toMatchObject({
+      _meta: {
+        lody: {
+          subagentRunId: "run-1",
+          subagentToolCallId: "sk::exec:0#abc123",
+        },
+      },
+    });
+  });
+
+  it("routes a context-free child permission via the earlier child tool_call", () => {
+    const proxy = makeProxy();
+    initialize(proxy);
+    newSession(proxy);
+    proxy.handleRuntime(started("agent-a"));
+    proxy.handleRuntime(
+      toolUpdate("call_plainid", "tool_call", {
+        "cognition.ai/inferenceToolName": "exec",
+        ...childCtx("agent-a"),
+      }),
+    );
+    // permission requests carry no subagent_context — ownership comes from
+    // the toolCallId recorded on the run
+    const perm = {
+      jsonrpc: "2.0",
+      id: 63,
+      method: "session/request_permission",
+      params: {
+        sessionId: SESSION,
+        toolCall: { toolCallId: "call_plainid", title: "x" },
+        options: [],
+      },
+    };
+    const out = proxy.handleRuntime(perm);
+    const fwd = out.toClient[0] as typeof perm;
+    expect(fwd.params.toolCall.toolCallId).toBe(
+      `subagent:${encodeURIComponent("run-1")}:call_plainid`,
+    );
+    expect(fwd.params).toMatchObject({
+      _meta: { lody: { subagentRunId: "run-1" } },
+    });
+  });
+
+  it("routes a permission for a resumed agentId to the new run", () => {
+    const proxy = makeProxy();
+    initialize(proxy);
+    newSession(proxy);
+    proxy.handleRuntime(started("agent-a")); // run-1
+    proxy.handleRuntime(
+      toolUpdate("call_old", "tool_call", childCtx("agent-a")),
+    );
+    proxy.handleRuntime(completed("agent-a"));
+    proxy.handleRuntime(started("agent-a", { isBackground: false })); // run-2
+    proxy.handleRuntime(
+      toolUpdate("call_new", "tool_call", childCtx("agent-a")),
+    );
+
+    const perm = {
+      jsonrpc: "2.0",
+      id: 64,
+      method: "session/request_permission",
+      params: {
+        sessionId: SESSION,
+        toolCall: { toolCallId: "call_new", title: "x" },
+        options: [],
+      },
+    };
+    const fwd = proxy.handleRuntime(perm).toClient[0] as typeof perm;
+    expect(fwd.params).toMatchObject({
+      toolCall: {
+        toolCallId: `subagent:${encodeURIComponent("run-2")}:call_new`,
+      },
+      _meta: { lody: { subagentRunId: "run-2" } },
+    });
+  });
+
+  it("passes a root tool permission through while a run is live", () => {
+    const proxy = makeProxy();
+    initialize(proxy);
+    newSession(proxy);
+    proxy.handleRuntime(skTool("sk::call_root#1")); // live sidekick run
+    const perm = {
+      jsonrpc: "2.0",
+      id: 65,
+      method: "session/request_permission",
+      params: {
+        sessionId: SESSION,
+        toolCall: { toolCallId: "call_roottool", title: "x" },
         options: [],
       },
     };
