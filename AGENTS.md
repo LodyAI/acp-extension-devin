@@ -17,6 +17,24 @@
 - stdout carries protocol only; diagnostics go to stderr. On connection close,
   end the child's stdin; propagate child error/exit codes and signals.
 
+## Maintenance workflow
+
+- Use feature branches and pull requests as the default delivery workflow.
+  Adapter maintainers own review and merging.
+- Before pushing, opening a PR, or updating main, present the changes and
+  verification results and obtain explicit approval from the user or
+  maintainer directing the task.
+- PR descriptions record the implementation rationale, validation scope, and
+  adapter/runtime versions. Review the full diff and complete the required
+  checks before merging.
+- Verify repository permissions and branch rules before choosing the merge
+  path. Confirm PR and mainline state through authoritative GitHub data.
+- Report implementation, commit, push, PR, and mainline status separately,
+  with the relevant commit IDs and PR links.
+- Before publishing commits or merges, verify that author and committer
+  identities are public-safe; use the approved noreply identity for
+  AI-assisted work.
+
 ## Subagent events
 
 - Translate the private subagent stream only after bilateral negotiation:
