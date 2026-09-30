@@ -36,7 +36,8 @@ the runtime's exit code or re-raises its terminating signal.
 `runtime-manifest.json` pins the official runtime the adapter is built against
 and every private field it relies on: `_meta` keys such as
 `cognition.ai/subagent_context`, the `cognition.ai/subagentSupport` client
-capability, the `sk::` sidekick tool-call prefix, and the reserved agent IDs.
+capability, the `_cognition.ai/compaction` notification method, the `sk::`
+sidekick tool-call prefix, and the reserved agent IDs.
 Tests assert against these values.
 
 The manifest declares Devin 3000.11.1 as the minimum supported version; from
@@ -45,17 +46,18 @@ The pinned and end-to-end validated version is 3000.11.3.
 
 ## Capabilities
 
-The adapter advertises only what it translates. Until the client opts in to
-subagent events, it is a transparent proxy: apart from its own capability in
-the `initialize` response, every message reaches the other side unchanged.
+The adapter advertises only what it translates. Compaction lifecycle
+notifications are translated directly, while subagent events are translated
+after bilateral negotiation. Other ACP traffic passes through.
 
 - Standard ACP from Devin, including sessions, prompts, tool calls,
   permission requests, modes and configuration options, passes through as the
   runtime reports it.
 - Core `subagentEvents` v1, described below.
+- Core `compaction` v1, described below.
 - MCP servers supplied by the client, forwarded verbatim.
 
-Usage accounting, a dedicated Plan Mode translation and Core compaction are not
+Usage accounting and a dedicated Plan Mode translation are not
 implemented, and the adapter does not advertise them.
 
 ## Subagent events
@@ -90,6 +92,12 @@ attribute. Runs do not support cancellation or output reads.
 `session/load` and `session/resume` replay is forwarded unchanged and creates
 no runs.
 
+## Compaction
+
+Devin's `_cognition.ai/compaction` notifications become Core context-compaction activities on standard ACP `tool_call` and `tool_call_update` messages. Native `started`, `completed` and `failed` states drive the lifecycle, and native summaries are retained in the activity details.
+
+The native `compact` command is available through the standard ACP prompt path. Its response can arrive before compaction finishes; the native notifications determine completion. Manual compaction, automatic compaction, and cancellation have been verified on Devin 3000.11.3. Manual compaction has also been verified in the Lody UI.
+
 ## MCP
 
 `mcpServers` from `session/new` and `session/load` are forwarded to Devin
@@ -121,7 +129,8 @@ pnpm build
 synthetic ACP messages and an injected `spawnImpl`; they never start a real
 Devin process or contact a model provider. They cover negotiation, run
 attribution and lifecycle, permission routing, replay handling, the runtime
-launch command, the manifest pin, and verbatim forwarding of non-empty stdio, HTTP and SSE MCP
+launch command, the manifest pin, compaction lifecycle, summaries and
+cancellation, and verbatim forwarding of non-empty stdio, HTTP and SSE MCP
 configurations in `session/new` and `session/load`, with and without subagent
 negotiation.
 

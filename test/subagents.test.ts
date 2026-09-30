@@ -167,7 +167,10 @@ describe("negotiation", () => {
       }
     ).result.agentCapabilities._meta;
     expect(caps["cognition.ai/chains"]).toBe(true);
-    expect(caps["lody"]).toEqual({ subagentEvents: { version: 1 } });
+    expect(caps["lody"]).toEqual({
+      subagentEvents: { version: 1 },
+      compaction: { version: 1 },
+    });
 
     newSession(proxy);
     const u = update({

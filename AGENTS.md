@@ -29,6 +29,15 @@
 - Sidekick runs are inferred (no wire lifecycle); never invent descriptions or
   summaries for them. `session/load` replay creates no runs.
 
+## Compaction
+
+- The native lifecycle owns completion independently of prompt responses: a
+  `/compact` ACK or a client cancel is not a terminal. Only `started`,
+  `completed` and `failed` on `_cognition.ai/compaction` drive the activity.
+- Emit optional activity metadata only from verified native data; never invent
+  duration, token counts, or failure reasons.
+- `session/load`/`session/resume` replay creates no live compaction activity.
+
 ## MCP
 
 - Forward `session/new` / `session/load` `mcpServers` verbatim. Devin

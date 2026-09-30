@@ -11,6 +11,13 @@ export interface PrivateWireContract {
   sidekickAgentId: string;
   toolNameMeta: string;
   inferenceToolNameMeta: string;
+  compactionNotificationMethod: string;
+  compactionSessionIdField: string;
+  compactionStatusField: string;
+  compactionSummaryField: string;
+  compactionStartedStatus: string;
+  compactionCompletedStatus: string;
+  compactionFailedStatus: string;
 }
 
 const FIELDS: readonly (keyof PrivateWireContract)[] = [
@@ -24,6 +31,13 @@ const FIELDS: readonly (keyof PrivateWireContract)[] = [
   "sidekickAgentId",
   "toolNameMeta",
   "inferenceToolNameMeta",
+  "compactionNotificationMethod",
+  "compactionSessionIdField",
+  "compactionStatusField",
+  "compactionSummaryField",
+  "compactionStartedStatus",
+  "compactionCompletedStatus",
+  "compactionFailedStatus",
 ];
 
 function loadPrivateWireContract(): PrivateWireContract {
