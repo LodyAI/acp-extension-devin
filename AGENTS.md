@@ -1,0 +1,36 @@
+# Devin ACP adapter guidelines
+
+`CLAUDE.md` is a symlink to this file. The public Lody repository guidelines also apply.
+
+## Scope
+
+- Standalone public adapter. Lody consumes its executable; never import Lody
+  workspace packages.
+- Launch only the official `devin acp` from an explicit `DEVIN_PATH`. Do not
+  patch or bundle Devin. Do not search `PATH`: the managed binary may
+  already be a user wrapper.
+- Private `cognition.ai/*` methods and `_meta` fields are translated inside the
+  adapter only. Every relied-on field is pinned in `runtime-manifest.json` and
+  asserted by tests against a fixed official runtime version.
+- Advertise only implemented Core capabilities; never declare a `_meta.lody`
+  capability before its translation exists.
+- stdout carries protocol only; diagnostics go to stderr. On connection close,
+  end the child's stdin; propagate child error/exit codes and signals.
+
+## MCP
+
+- Forward `session/new` / `session/load` `mcpServers` verbatim. Devin
+  `>=3000.11.1` accepts stdio, HTTP and SSE there; the adapter never writes an
+  MCP configuration file.
+
+## Tests
+
+- Synthetic inputs and explicit signals only: no sleeps, no real Devin process,
+  no commercial providers. Inject `spawnImpl` for process assertions. Never
+  commit captured transcripts; fixtures must be synthetic.
+
+## Checks
+
+- Before committing run `pnpm check` and `pnpm build`.
+- Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`, `test:`. AI commits
+  end with `Model: <runtime-model-id>`.

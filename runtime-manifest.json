@@ -1,0 +1,17 @@
+{
+  "officialRuntime": {
+    "package": "devin",
+    "version": "3000.11.3",
+    "minimumSupportedVersion": "3000.11.1"
+  },
+  "privateWireContract": {
+    "sidekickToolCallMeta": "cognition.ai/sidekick",
+    "sidekickToolCallIdPrefix": "sk::",
+    "subagentContextMeta": "cognition.ai/subagent_context",
+    "subagentStartedMeta": "cognition.ai/subagent_started",
+    "subagentCompletedMeta": "cognition.ai/subagent_completed",
+    "subagentSupportClientCapability": "cognition.ai/subagentSupport",
+    "toolNameMeta": "cognition.ai/toolName",
+    "inferenceToolNameMeta": "cognition.ai/inferenceToolName"
+  }
+}
