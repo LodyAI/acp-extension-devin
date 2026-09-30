@@ -1,3 +1,18 @@
+import {
+  LODY_SUBAGENT_EVENT_METHOD,
+  supportsLodySubagentEvents,
+} from "acp-extension-core";
+
+import { privateWireContract as contract } from "./manifest.js";
+import {
+  DevinSubagentEvents,
+  type DevinSubagentEventsOptions,
+  type SubagentOut,
+} from "./subagents.js";
+
+const SUBAGENT_SUPPORT_META = contract.subagentSupportClientCapability;
+const SUBAGENT_EVENTS_CAPABILITY = { version: 1 } as const;
+
 export type JsonRpcId = string | number;
 
 export interface JsonRpcRequest {
@@ -29,7 +44,7 @@ export interface ProxyOutput {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isRequest(message: JsonRpcMessage): message is JsonRpcRequest {
@@ -48,21 +63,73 @@ function isResponse(message: JsonRpcMessage): message is JsonRpcResponse {
   );
 }
 
+interface PendingRequest {
+  method: string;
+  sessionId?: string;
+}
+
 /**
- * Transparent ACP-to-ACP proxy between Lody (client) and `devin acp`
- * (runtime). The skeleton forwards everything verbatim; `pending` already
- * records client request id -> method so later translations can act on
- * "which request this response answers". Note both directions own separate
- * JSON-RPC id spaces, so runtime requests and runtime responses are never
- * recorded here.
+ * ACP-to-ACP proxy between Lody (client) and `devin acp` (runtime).
+ * Negotiates Core subagent events and, for admitted root sessions, translates
+ * Devin's run_subagent / sidekick wire into `_lody/subagents/event`
+ * notifications. Unnegotiated or unadmitted traffic is forwarded verbatim.
  */
 export class DevinAcpProxy {
-  private readonly pending = new Map<JsonRpcId, string>();
+  private readonly pending = new Map<JsonRpcId, PendingRequest>();
+  private readonly sessions = new Map<string, DevinSubagentEvents>();
+  private readonly admitted = new Set<string>();
+  /** sessions inside a session/load replay window: updates pass through. */
+  private readonly replaying = new Set<string>();
+  private negotiated = false;
+  private readonly subagentOpts: DevinSubagentEventsOptions;
+
+  constructor(opts: DevinSubagentEventsOptions = {}) {
+    this.subagentOpts = opts;
+  }
 
   handleClient(message: unknown): ProxyOutput {
-    const msg = message as JsonRpcMessage;
-    if (isRecord(msg) && isRequest(msg)) {
-      this.pending.set(msg.id, msg.method);
+    let msg = message as JsonRpcMessage;
+    if (!isRecord(msg)) return { toClient: [], toRuntime: [msg] };
+
+    if (isRequest(msg)) {
+      const sessionId =
+        isRecord(msg.params) && typeof msg.params["sessionId"] === "string"
+          ? msg.params["sessionId"]
+          : undefined;
+      this.pending.set(msg.id, { method: msg.method, sessionId });
+
+      if (msg.method === "initialize") {
+        const caps = isRecord(msg.params)
+          ? msg.params["clientCapabilities"]
+          : undefined;
+        this.negotiated = supportsLodySubagentEvents(caps);
+        if (this.negotiated && isRecord(msg.params)) {
+          // ask the runtime for its private subagent stream
+          msg = {
+            ...msg,
+            params: {
+              ...msg.params,
+              clientCapabilities: {
+                ...(isRecord(caps) ? caps : {}),
+                _meta: {
+                  ...(isRecord(caps) && isRecord(caps["_meta"])
+                    ? caps["_meta"]
+                    : {}),
+                  [SUBAGENT_SUPPORT_META]: true,
+                },
+              },
+            },
+          };
+        }
+      }
+
+      if (
+        this.negotiated &&
+        (msg.method === "session/load" || msg.method === "session/resume") &&
+        sessionId
+      ) {
+        this.replaying.add(sessionId);
+      }
     }
     // Client responses to runtime reverse requests carry an id but no method;
     // they are forwarded verbatim and must not touch the pending map.
@@ -71,14 +138,169 @@ export class DevinAcpProxy {
 
   handleRuntime(message: unknown): ProxyOutput {
     const msg = message as JsonRpcMessage;
-    if (isRecord(msg) && isResponse(msg)) {
+    if (!isRecord(msg)) return { toClient: [msg], toRuntime: [] };
+
+    if (isResponse(msg)) {
+      const pending = this.pending.get(msg.id);
       this.pending.delete(msg.id);
+      return this.handleRuntimeResponse(msg, pending);
+    }
+
+    if (isRequest(msg)) {
+      return this.handleRuntimeRequest(msg);
+    }
+
+    // notifications
+    if (msg.method === "session/update" && isRecord(msg.params)) {
+      return this.handleSessionUpdate(msg);
     }
     return { toClient: [msg], toRuntime: [] };
   }
 
+  private handleRuntimeResponse(
+    msg: JsonRpcResponse,
+    pending: PendingRequest | undefined,
+  ): ProxyOutput {
+    const toClient: JsonRpcMessage[] = [];
+
+    if (pending?.method === "initialize" && isRecord(msg.result)) {
+      const agentCaps = isRecord(msg.result["agentCapabilities"])
+        ? msg.result["agentCapabilities"]
+        : {};
+      const meta = isRecord(agentCaps["_meta"]) ? agentCaps["_meta"] : {};
+      const lody = isRecord(meta["lody"]) ? meta["lody"] : {};
+      const result = {
+        ...msg.result,
+        agentCapabilities: {
+          ...agentCaps,
+          _meta: {
+            ...meta,
+            lody: { ...lody, subagentEvents: SUBAGENT_EVENTS_CAPABILITY },
+          },
+        },
+      };
+      toClient.push({ ...msg, result });
+      return { toClient, toRuntime: [] };
+    }
+
+    if (
+      pending?.method === "session/new" ||
+      pending?.method === "session/fork"
+    ) {
+      if (isRecord(msg.result) && typeof msg.result["sessionId"] === "string") {
+        this.admit(msg.result["sessionId"]);
+      }
+    } else if (
+      (pending?.method === "session/load" ||
+        pending?.method === "session/resume") &&
+      pending.sessionId
+    ) {
+      this.replaying.delete(pending.sessionId);
+      if (msg.result !== undefined && msg.error === undefined) {
+        this.admit(pending.sessionId);
+      }
+    } else if (pending?.method === "session/prompt" && pending.sessionId) {
+      const session = this.sessions.get(pending.sessionId);
+      if (session) {
+        const isError = msg.error !== undefined;
+        const stopReason =
+          isRecord(msg.result) && typeof msg.result["stopReason"] === "string"
+            ? msg.result["stopReason"]
+            : undefined;
+        for (const o of session.handlePromptDone(stopReason, isError)) {
+          toClient.push(...this.render(session, o));
+        }
+      }
+    }
+
+    toClient.push(msg);
+    return { toClient, toRuntime: [] };
+  }
+
+  private handleRuntimeRequest(msg: JsonRpcRequest): ProxyOutput {
+    if (msg.method === "session/request_permission" && isRecord(msg.params)) {
+      const sessionId =
+        typeof msg.params["sessionId"] === "string"
+          ? msg.params["sessionId"]
+          : undefined;
+      const session = sessionId ? this.sessions.get(sessionId) : undefined;
+      if (
+        session &&
+        sessionId &&
+        this.admitted.has(sessionId) &&
+        !this.replaying.has(sessionId)
+      ) {
+        const rewritten = session.rewritePermissionParams(msg.params);
+        if (rewritten) {
+          const toClient: JsonRpcMessage[] = [];
+          for (const o of rewritten.events) {
+            toClient.push(...this.render(session, o));
+          }
+          toClient.push({ ...msg, params: rewritten.params });
+          return { toClient, toRuntime: [] };
+        }
+      }
+    }
+    return { toClient: [msg], toRuntime: [] };
+  }
+
+  private handleSessionUpdate(msg: JsonRpcNotification): ProxyOutput {
+    const params = msg.params as Record<string, unknown>;
+    const sessionId =
+      typeof params["sessionId"] === "string" ? params["sessionId"] : undefined;
+    const update = params["update"];
+    const session = sessionId ? this.sessions.get(sessionId) : undefined;
+    if (
+      !this.negotiated ||
+      !sessionId ||
+      !session ||
+      !this.admitted.has(sessionId) ||
+      this.replaying.has(sessionId) ||
+      !isRecord(update)
+    ) {
+      return { toClient: [msg], toRuntime: [] };
+    }
+    const toClient: JsonRpcMessage[] = [];
+    for (const o of session.handleSessionUpdate(update)) {
+      toClient.push(...this.render(session, o));
+    }
+    return { toClient, toRuntime: [] };
+  }
+
+  private render(
+    session: DevinSubagentEvents,
+    out: SubagentOut,
+  ): JsonRpcMessage[] {
+    if (out.kind === "event") {
+      return [
+        {
+          jsonrpc: "2.0",
+          method: LODY_SUBAGENT_EVENT_METHOD,
+          params: out.event as unknown as Record<string, unknown>,
+        },
+      ];
+    }
+    return [
+      {
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: { sessionId: session.sessionId, update: out.update },
+      },
+    ];
+  }
+
+  private admit(sessionId: string) {
+    if (!this.admitted.has(sessionId)) {
+      this.admitted.add(sessionId);
+      this.sessions.set(
+        sessionId,
+        new DevinSubagentEvents(sessionId, this.subagentOpts),
+      );
+    }
+  }
+
   /** Method of the still-pending client request, for translation dispatch. */
   pendingClientMethod(id: JsonRpcId): string | undefined {
-    return this.pending.get(id);
+    return this.pending.get(id)?.method;
   }
 }

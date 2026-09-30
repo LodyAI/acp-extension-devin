@@ -33,7 +33,18 @@ describe("DevinAcpProxy", () => {
     expect(proxy.pendingClientMethod(1)).toBe("initialize");
 
     expect(proxy.handleRuntime(initializeResponse)).toEqual({
-      toClient: [initializeResponse],
+      toClient: [
+        {
+          ...initializeResponse,
+          result: {
+            ...initializeResponse.result,
+            agentCapabilities: {
+              ...initializeResponse.result.agentCapabilities,
+              _meta: { lody: { subagentEvents: { version: 1 } } },
+            },
+          },
+        },
+      ],
       toRuntime: [],
     });
     expect(proxy.pendingClientMethod(1)).toBeUndefined();
@@ -138,6 +149,8 @@ describe("runtime manifest", () => {
     expect(contract.subagentSupportClientCapability).toBe(
       "cognition.ai/subagentSupport",
     );
+    expect(contract.rootAgentId).toBe("root");
+    expect(contract.sidekickAgentId).toBe("sidekick");
     expect(contract.toolNameMeta).toBe("cognition.ai/toolName");
     expect(contract.inferenceToolNameMeta).toBe(
       "cognition.ai/inferenceToolName",
