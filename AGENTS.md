@@ -17,6 +17,18 @@
 - stdout carries protocol only; diagnostics go to stderr. On connection close,
   end the child's stdin; propagate child error/exit codes and signals.
 
+## Subagent events
+
+- Translate the private subagent stream only after bilateral negotiation:
+  client `_meta.lody.subagentEvents` in, `cognition.ai/subagentSupport` out.
+- Once negotiated, native child output and lifecycle rows never reach the root
+  stream; unattributed events must not become root output.
+- A snapshot precedes all content of its run; late content after termination is
+  dropped. Run IDs are adapter-owned and distinct from Devin agentIds — a reused
+  agentId after termination is a new run.
+- Sidekick runs are inferred (no wire lifecycle); never invent descriptions or
+  summaries for them. `session/load` replay creates no runs.
+
 ## MCP
 
 - Forward `session/new` / `session/load` `mcpServers` verbatim. Devin

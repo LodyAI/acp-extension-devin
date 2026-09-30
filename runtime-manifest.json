@@ -11,6 +11,8 @@
     "subagentStartedMeta": "cognition.ai/subagent_started",
     "subagentCompletedMeta": "cognition.ai/subagent_completed",
     "subagentSupportClientCapability": "cognition.ai/subagentSupport",
+    "rootAgentId": "root",
+    "sidekickAgentId": "sidekick",
     "toolNameMeta": "cognition.ai/toolName",
     "inferenceToolNameMeta": "cognition.ai/inferenceToolName"
   }
