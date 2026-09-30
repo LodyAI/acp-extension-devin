@@ -35,6 +35,17 @@
   `>=3000.11.1` accepts stdio, HTTP and SSE there; the adapter never writes an
   MCP configuration file.
 
+## Local working records
+
+- Optional `local-work/` holds checkout-local working records and evidence.
+  Exclude it through this checkout's Git `info/exclude`; never stage or publish
+  its contents. `CLAUDE.md` remains a symlink to this file.
+- When that directory exists, read `local-work/AGENTS.md` and
+  `local-work/STATUS.md` before resuming work, then follow their decision and
+  evidence links. Local notes supplement these public rules.
+- Public behavior and contributor-wide rules belong in tracked documentation;
+  local notes do not replace public contracts or approval.
+
 ## Tests
 
 - Synthetic inputs and explicit signals only: no sleeps, no real Devin process,
