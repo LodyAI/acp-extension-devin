@@ -22,6 +22,7 @@ const ROOT_ACTIVITY = new Set([
   "plan",
 ]);
 const TERMINAL_TOOL_STATUS = new Set(["completed", "failed"]);
+const TOOL_DISPLAY_FIELDS = ["title", "kind", "rawInput", "locations"] as const;
 const MAX_BUFFERED_CHILD_UPDATES = 64;
 
 type Update = Record<string, unknown>;
@@ -51,6 +52,8 @@ interface Run {
   inFlight: Set<string>;
   /** toolCallIds mirrored to root for permission prompts. */
   mirrors: Set<string>;
+  /** display fields remembered per toolCallId for permission mirroring. */
+  toolDisplay: Map<string, Record<string, unknown>>;
 }
 
 export interface DevinSubagentEventsOptions {
@@ -70,6 +73,19 @@ function agentContext(update: Update): string | undefined {
   if (!isRecord(ctx)) return undefined;
   const id = ctx["parentAgentId"];
   return typeof id === "string" ? id : undefined;
+}
+
+/** Merge the display fields a tool_call/_update carries into the run's record. */
+function rememberToolDisplay(
+  run: Run,
+  toolCallId: string,
+  update: Update,
+): void {
+  const entry = run.toolDisplay.get(toolCallId) ?? {};
+  for (const field of TOOL_DISPLAY_FIELDS) {
+    if (update[field] !== undefined) entry[field] = update[field];
+  }
+  run.toolDisplay.set(toolCallId, entry);
 }
 
 function usageProgress(update: Update): LodySubagentProgress {
@@ -167,6 +183,7 @@ export class DevinSubagentEvents {
       toolIds: new Set(),
       inFlight: new Set(),
       mirrors: new Set(),
+      toolDisplay: new Map(),
     };
     this.runs.set(agentId, run);
     return run;
@@ -197,6 +214,7 @@ export class DevinSubagentEvents {
       toolIds: new Set(),
       inFlight: new Set(),
       mirrors: new Set(),
+      toolDisplay: new Map(),
     };
     this.sidekickRun = run;
     out.push(this.emit(run, { type: "snapshot", snapshot: run.snapshot }));
@@ -382,6 +400,13 @@ export class DevinSubagentEvents {
         run.inFlight.delete(toolCallId);
         if (toolCallId) run.toolIds.add(toolCallId);
       }
+      if (
+        (sessionUpdate === "tool_call" ||
+          sessionUpdate === "tool_call_update") &&
+        toolCallId
+      ) {
+        rememberToolDisplay(run, toolCallId, update);
+      }
       if (isLodySubagentOutput(update)) {
         out.push(this.emit(run, { type: "output", update }));
         if (toolCallId && run.mirrors.has(toolCallId)) {
@@ -419,6 +444,13 @@ export class DevinSubagentEvents {
         this.emit(run, { type: "progress", progress: usageProgress(update) }),
       );
       return out;
+    }
+    if (
+      (update["sessionUpdate"] === "tool_call" ||
+        update["sessionUpdate"] === "tool_call_update") &&
+      typeof update["toolCallId"] === "string"
+    ) {
+      rememberToolDisplay(run, update["toolCallId"], update);
     }
     if (isLodySubagentOutput(update)) {
       const toolCallId =
@@ -487,11 +519,19 @@ export class DevinSubagentEvents {
     }
     if (!run) return null;
     run.mirrors.add(id);
+    // Devin's request carries only toolCallId + _meta; merge the display
+    // fields remembered from the run's own tool_call/_update so the client
+    // can render a command-specific prompt and history card.
+    const known = run.toolDisplay.get(id) ?? {};
     return {
       events,
       params: {
         ...params,
-        toolCall: { ...toolCall, toolCallId: mirrorToolCallId(run.runId, id) },
+        toolCall: {
+          ...known,
+          ...toolCall,
+          toolCallId: mirrorToolCallId(run.runId, id),
+        },
         _meta: {
           ...(isRecord(params["_meta"]) ? params["_meta"] : {}),
           lody: { subagentRunId: run.runId, subagentToolCallId: id },

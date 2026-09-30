@@ -922,6 +922,169 @@ describe("permission mirroring", () => {
     });
   });
 
+  it("merges remembered tool display fields into a mirrored permission", () => {
+    const proxy = makeProxy();
+    initialize(proxy);
+    newSession(proxy);
+    proxy.handleRuntime(started("agent-a"));
+    proxy.handleRuntime(
+      update({
+        sessionUpdate: "tool_call",
+        toolCallId: "call_display",
+        title: "List files",
+        kind: "execute",
+        rawInput: { command: "ls -la /work" },
+        _meta: childCtx("agent-a"),
+      }),
+    );
+    // Devin's permission request carries only the id and its own meta
+    const perm = {
+      jsonrpc: "2.0",
+      id: 70,
+      method: "session/request_permission",
+      params: {
+        sessionId: SESSION,
+        toolCall: {
+          toolCallId: "call_display",
+          _meta: { "cognition.ai/editableCommand": "ls -la /work" },
+        },
+        options: [{ optionId: "allow" }],
+      },
+    };
+    const fwd = proxy.handleRuntime(perm).toClient[0] as typeof perm;
+    expect(fwd.params.toolCall).toMatchObject({
+      toolCallId: `subagent:${encodeURIComponent("run-1")}:call_display`,
+      title: "List files",
+      kind: "execute",
+      rawInput: { command: "ls -la /work" },
+      _meta: { "cognition.ai/editableCommand": "ls -la /work" },
+    });
+  });
+
+  it("lets a later tool_call_update title override the stored display", () => {
+    const proxy = makeProxy();
+    initialize(proxy);
+    newSession(proxy);
+    proxy.handleRuntime(started("agent-a"));
+    proxy.handleRuntime(
+      update({
+        sessionUpdate: "tool_call",
+        toolCallId: "call_override",
+        title: "Initial title",
+        kind: "execute",
+        _meta: childCtx("agent-a"),
+      }),
+    );
+    proxy.handleRuntime(
+      update({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "call_override",
+        title: "Updated title",
+        status: "in_progress",
+        _meta: childCtx("agent-a"),
+      }),
+    );
+    const perm = {
+      jsonrpc: "2.0",
+      id: 71,
+      method: "session/request_permission",
+      params: {
+        sessionId: SESSION,
+        toolCall: { toolCallId: "call_override" },
+        options: [],
+      },
+    };
+    const fwd = proxy.handleRuntime(perm).toClient[0] as typeof perm;
+    expect(fwd.params.toolCall).toMatchObject({
+      title: "Updated title",
+      kind: "execute",
+    });
+  });
+
+  it("keeps a request-supplied title over the stored display", () => {
+    const proxy = makeProxy();
+    initialize(proxy);
+    newSession(proxy);
+    proxy.handleRuntime(started("agent-a"));
+    proxy.handleRuntime(
+      update({
+        sessionUpdate: "tool_call",
+        toolCallId: "call_reqtitle",
+        title: "Stored title",
+        _meta: childCtx("agent-a"),
+      }),
+    );
+    const perm = {
+      jsonrpc: "2.0",
+      id: 72,
+      method: "session/request_permission",
+      params: {
+        sessionId: SESSION,
+        toolCall: { toolCallId: "call_reqtitle", title: "Request title" },
+        options: [],
+      },
+    };
+    const fwd = proxy.handleRuntime(perm).toClient[0] as typeof perm;
+    expect(fwd.params.toolCall["title"]).toBe("Request title");
+  });
+
+  it("merges stored display fields for a sidekick sk:: permission", () => {
+    const proxy = makeProxy();
+    initialize(proxy);
+    newSession(proxy);
+    proxy.handleRuntime(
+      update({
+        sessionUpdate: "tool_call",
+        toolCallId: "sk::exec:0#feed42",
+        title: "Run touch",
+        kind: "execute",
+        rawInput: { command: "touch /work/sk.txt" },
+        _meta: { "cognition.ai/sidekick": true },
+      }),
+    );
+    const perm = {
+      jsonrpc: "2.0",
+      id: 73,
+      method: "session/request_permission",
+      params: {
+        sessionId: SESSION,
+        toolCall: { toolCallId: "sk::exec:0#feed42" },
+        options: [],
+      },
+    };
+    const fwd = proxy.handleRuntime(perm).toClient[0] as typeof perm;
+    expect(fwd.params.toolCall).toMatchObject({
+      toolCallId: `subagent:${encodeURIComponent("run-1")}:${encodeURIComponent("sk::exec:0#feed42")}`,
+      title: "Run touch",
+      kind: "execute",
+      rawInput: { command: "touch /work/sk.txt" },
+    });
+  });
+
+  it("invents no display fields when permission precedes any tool_call", () => {
+    const proxy = makeProxy();
+    initialize(proxy);
+    newSession(proxy);
+    const out = proxy.handleRuntime({
+      jsonrpc: "2.0",
+      id: 75,
+      method: "session/request_permission",
+      params: {
+        sessionId: SESSION,
+        toolCall: { toolCallId: "sk::exec:0#brand-new" },
+        options: [],
+      },
+    });
+    // snapshot event precedes the rewritten request; the mirrored toolCall
+    // carries only the namespaced id — no fields invented
+    const fwd = out.toClient[out.toClient.length - 1] as {
+      params: { toolCall: Record<string, unknown> };
+    };
+    expect(fwd.params.toolCall).toEqual({
+      toolCallId: `subagent:${encodeURIComponent("run-1")}:${encodeURIComponent("sk::exec:0#brand-new")}`,
+    });
+  });
+
   it("passes a root tool permission through while a run is live", () => {
     const proxy = makeProxy();
     initialize(proxy);
