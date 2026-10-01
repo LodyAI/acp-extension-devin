@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   LODY_SUBAGENT_EVENT_METHOD,
   supportsLodySubagentEvents,
@@ -12,6 +14,10 @@ import {
 
 const SUBAGENT_SUPPORT_META = contract.subagentSupportClientCapability;
 const SUBAGENT_EVENTS_CAPABILITY = { version: 1 } as const;
+const COMPACTION_CAPABILITY = { version: 1 } as const;
+const COMPACTION_ACTIVITY_META = {
+  lody: { activity: { version: 1, kind: "context_compaction" } },
+} as const;
 
 export type JsonRpcId = string | number;
 
@@ -70,9 +76,9 @@ interface PendingRequest {
 
 /**
  * ACP-to-ACP proxy between Lody (client) and `devin acp` (runtime).
- * Negotiates Core subagent events and, for admitted root sessions, translates
- * Devin's run_subagent / sidekick wire into `_lody/subagents/event`
- * notifications. Unnegotiated or unadmitted traffic is forwarded verbatim.
+ * For admitted root sessions it translates native compaction lifecycle
+ * notifications into Core activities; subagent event translation additionally
+ * requires bilateral negotiation. Other ACP traffic is forwarded unchanged.
  */
 export class DevinAcpProxy {
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
@@ -80,11 +86,15 @@ export class DevinAcpProxy {
   private readonly admitted = new Set<string>();
   /** sessions inside a session/load replay window: updates pass through. */
   private readonly replaying = new Set<string>();
+  /** admitted sessions with a live native compaction, keyed tool call id. */
+  private readonly activeCompactions = new Map<string, string>();
   private negotiated = false;
   private readonly subagentOpts: DevinSubagentEventsOptions;
+  private readonly newId: () => string;
 
   constructor(opts: DevinSubagentEventsOptions = {}) {
     this.subagentOpts = opts;
+    this.newId = opts.newId ?? randomUUID;
   }
 
   handleClient(message: unknown): ProxyOutput {
@@ -124,7 +134,6 @@ export class DevinAcpProxy {
       }
 
       if (
-        this.negotiated &&
         (msg.method === "session/load" || msg.method === "session/resume") &&
         sessionId
       ) {
@@ -154,6 +163,9 @@ export class DevinAcpProxy {
     if (msg.method === "session/update" && isRecord(msg.params)) {
       return this.handleSessionUpdate(msg);
     }
+    if (msg.method === contract.compactionNotificationMethod) {
+      return this.handleCompactionNotification(msg);
+    }
     return { toClient: [msg], toRuntime: [] };
   }
 
@@ -175,7 +187,11 @@ export class DevinAcpProxy {
           ...agentCaps,
           _meta: {
             ...meta,
-            lody: { ...lody, subagentEvents: SUBAGENT_EVENTS_CAPABILITY },
+            lody: {
+              ...lody,
+              subagentEvents: SUBAGENT_EVENTS_CAPABILITY,
+              compaction: COMPACTION_CAPABILITY,
+            },
           },
         },
       };
@@ -265,6 +281,99 @@ export class DevinAcpProxy {
       toClient.push(...this.render(session, o));
     }
     return { toClient, toRuntime: [] };
+  }
+
+  /**
+   * Devin's private `_cognition.ai/compaction` lifecycle, rendered as a Core
+   * context-compaction activity on a synthetic tool call. The native lifecycle
+   * owns completion independently of the `/compact` prompt response. Only
+   * admitted sessions outside a replay window produce activity; replay and
+   * malformed or unknown-status rows pass through untouched.
+   */
+  private handleCompactionNotification(msg: JsonRpcNotification): ProxyOutput {
+    const params = msg.params;
+    const sessionId =
+      isRecord(params) &&
+      typeof params[contract.compactionSessionIdField] === "string" &&
+      params[contract.compactionSessionIdField]
+        ? (params[contract.compactionSessionIdField] as string)
+        : undefined;
+    const status = isRecord(params)
+      ? params[contract.compactionStatusField]
+      : undefined;
+    const known =
+      status === contract.compactionStartedStatus ||
+      status === contract.compactionCompletedStatus ||
+      status === contract.compactionFailedStatus;
+    if (
+      !sessionId ||
+      !known ||
+      !this.admitted.has(sessionId) ||
+      this.replaying.has(sessionId)
+    ) {
+      return { toClient: [msg], toRuntime: [] };
+    }
+
+    if (status === contract.compactionStartedStatus) {
+      if (this.activeCompactions.has(sessionId)) {
+        return { toClient: [], toRuntime: [] };
+      }
+      const toolCallId = `devin-compaction-${this.newId()}`;
+      this.activeCompactions.set(sessionId, toolCallId);
+      return {
+        toClient: [
+          {
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              sessionId,
+              update: {
+                sessionUpdate: "tool_call",
+                toolCallId,
+                title: "Compact context",
+                kind: "other",
+                status: "in_progress",
+                _meta: { ...COMPACTION_ACTIVITY_META },
+              },
+            },
+          },
+        ],
+        toRuntime: [],
+      };
+    }
+
+    const toolCallId = this.activeCompactions.get(sessionId);
+    this.activeCompactions.delete(sessionId);
+    if (!toolCallId) {
+      return { toClient: [], toRuntime: [] };
+    }
+    const update: Record<string, unknown> = {
+      sessionUpdate: "tool_call_update",
+      toolCallId,
+      status,
+      _meta: { ...COMPACTION_ACTIVITY_META },
+    };
+    const summary = (params as Record<string, unknown>)[
+      contract.compactionSummaryField
+    ];
+    if (
+      status === contract.compactionCompletedStatus &&
+      typeof summary === "string"
+    ) {
+      update["content"] = [
+        { type: "content", content: { type: "text", text: summary } },
+      ];
+    }
+    return {
+      toClient: [
+        {
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: { sessionId, update },
+        },
+      ],
+      toRuntime: [],
+    };
   }
 
   private render(
