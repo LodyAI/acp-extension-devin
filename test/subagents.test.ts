@@ -170,6 +170,7 @@ describe("negotiation", () => {
     expect(caps["lody"]).toEqual({
       subagentEvents: { version: 1 },
       compaction: { version: 1 },
+      elicitation: { version: 1 },
     });
 
     newSession(proxy);
