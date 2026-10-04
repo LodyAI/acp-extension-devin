@@ -44,6 +44,7 @@ describe("DevinAcpProxy", () => {
                 lody: {
                   subagentEvents: { version: 1 },
                   compaction: { version: 1 },
+                  elicitation: { version: 1 },
                 },
               },
             },
@@ -359,6 +360,7 @@ describe("compaction lifecycle translation", () => {
                   other: { version: 1 },
                   subagentEvents: { version: 1 },
                   compaction: { version: 1 },
+                  elicitation: { version: 1 },
                 },
               },
             },

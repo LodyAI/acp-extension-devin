@@ -5,6 +5,12 @@ import {
   supportsLodySubagentEvents,
 } from "acp-extension-core";
 
+import {
+  clientSupportsLodyElicitation,
+  foldElicitationResponse,
+  rewriteElicitationParams,
+  type CustomAnswerField,
+} from "./elicitation.js";
 import { privateWireContract as contract } from "./manifest.js";
 import {
   DevinSubagentEvents,
@@ -15,6 +21,7 @@ import {
 const SUBAGENT_SUPPORT_META = contract.subagentSupportClientCapability;
 const SUBAGENT_EVENTS_CAPABILITY = { version: 1 } as const;
 const COMPACTION_CAPABILITY = { version: 1 } as const;
+const ELICITATION_CAPABILITY = { version: 1 } as const;
 const COMPACTION_ACTIVITY_META = {
   lody: { activity: { version: 1, kind: "context_compaction" } },
 } as const;
@@ -108,7 +115,9 @@ function isManualCompactionPrompt(params: unknown): boolean {
  * ACP-to-ACP proxy between Lody (client) and `devin acp` (runtime).
  * For admitted root sessions it translates native compaction lifecycle
  * notifications into Core activities; subagent event translation additionally
- * requires bilateral negotiation. Other ACP traffic is forwarded unchanged.
+ * requires bilateral negotiation. When the client advertises
+ * `_meta.lody.elicitation`, private elicitation hints are translated into the
+ * Core elicitation contract. Other ACP traffic is forwarded unchanged.
  */
 export class DevinAcpProxy {
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
@@ -121,6 +130,13 @@ export class DevinAcpProxy {
   /** admitted sessions with a live native compaction. */
   private readonly activeCompactions = new Map<string, ActiveCompaction>();
   private negotiated = false;
+  /** client advertised _meta.lody.elicitation — translate private elicitation hints. */
+  private lodyElicitation = false;
+  /** elicitation/create request id -> injected custom-answer companion fields. */
+  private readonly elicitationCustomFields = new Map<
+    JsonRpcId,
+    Map<string, CustomAnswerField>
+  >();
   private readonly subagentOpts: DevinSubagentEventsOptions;
   private readonly newId: () => string;
 
@@ -153,6 +169,7 @@ export class DevinAcpProxy {
           ? msg.params["clientCapabilities"]
           : undefined;
         this.negotiated = supportsLodySubagentEvents(caps);
+        this.lodyElicitation = clientSupportsLodyElicitation(caps);
         if (this.negotiated && isRecord(msg.params)) {
           // ask the runtime for its private subagent stream
           msg = {
@@ -191,6 +208,14 @@ export class DevinAcpProxy {
     }
     // Client responses to runtime reverse requests carry an id but no method;
     // they are forwarded verbatim and must not touch the pending map.
+    if (isResponse(msg)) {
+      const customFields = this.elicitationCustomFields.get(msg.id);
+      if (customFields) {
+        this.elicitationCustomFields.delete(msg.id);
+        const result = foldElicitationResponse(msg.result, customFields);
+        if (result !== undefined) msg = { ...msg, result };
+      }
+    }
     return { toClient: [], toRuntime: [msg] };
   }
 
@@ -240,6 +265,7 @@ export class DevinAcpProxy {
               ...lody,
               subagentEvents: SUBAGENT_EVENTS_CAPABILITY,
               compaction: COMPACTION_CAPABILITY,
+              elicitation: ELICITATION_CAPABILITY,
             },
           },
         },
@@ -291,6 +317,22 @@ export class DevinAcpProxy {
   }
 
   private handleRuntimeRequest(msg: JsonRpcRequest): ProxyOutput {
+    if (
+      msg.method === "elicitation/create" &&
+      isRecord(msg.params) &&
+      this.lodyElicitation
+    ) {
+      const rewritten = rewriteElicitationParams(msg.params);
+      if (rewritten) {
+        if (rewritten.customFields.size > 0) {
+          this.elicitationCustomFields.set(msg.id, rewritten.customFields);
+        }
+        return {
+          toClient: [{ ...msg, params: rewritten.params }],
+          toRuntime: [],
+        };
+      }
+    }
     if (msg.method === "session/request_permission" && isRecord(msg.params)) {
       const sessionId =
         typeof msg.params["sessionId"] === "string"
