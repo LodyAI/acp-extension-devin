@@ -18,6 +18,7 @@ export interface PrivateWireContract {
   compactionStartedStatus: string;
   compactionCompletedStatus: string;
   compactionFailedStatus: string;
+  compactionManualCommand: string;
 }
 
 const FIELDS: readonly (keyof PrivateWireContract)[] = [
@@ -38,6 +39,7 @@ const FIELDS: readonly (keyof PrivateWireContract)[] = [
   "compactionStartedStatus",
   "compactionCompletedStatus",
   "compactionFailedStatus",
+  "compactionManualCommand",
 ];
 
 function loadPrivateWireContract(): PrivateWireContract {

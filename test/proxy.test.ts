@@ -241,6 +241,7 @@ describe("runtime manifest", () => {
     expect(contract.compactionStartedStatus).toBe("started");
     expect(contract.compactionCompletedStatus).toBe("completed");
     expect(contract.compactionFailedStatus).toBe("failed");
+    expect(contract.compactionManualCommand).toBe("/compact");
   });
 });
 
@@ -290,9 +291,25 @@ describe("compaction lifecycle translation", () => {
       result: { sessionId, configOptions: [] },
     });
   };
+  const toolUpdates = (out: { toClient: { params?: unknown }[] }) =>
+    out.toClient.map(
+      (message) =>
+        (message as { params: { update: Record<string, unknown> } }).params
+          .update,
+    );
   const toolUpdate = (out: { toClient: { params?: unknown }[] }) =>
-    (out.toClient[0] as { params: { update: Record<string, unknown> } }).params
-      .update;
+    toolUpdates(out).at(-1);
+  const compactPrompt = (
+    proxy: DevinAcpProxy,
+    sessionId: string,
+    text = "/compact",
+  ) =>
+    proxy.handleClient({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text }] },
+    });
 
   it("advertises subagentEvents and compaction while preserving all other meta", () => {
     const proxy = newProxy();
@@ -357,8 +374,16 @@ describe("compaction lifecycle translation", () => {
     initialize(proxy);
     newSession(proxy, "s1");
 
-    const started = proxy.handleRuntime(compaction("s1", "started"));
-    expect(toolUpdate(started)).toEqual({
+    expect(proxy.handleRuntime(compaction("s1", "started"))).toEqual({
+      toClient: [],
+      toRuntime: [],
+    });
+
+    const done = proxy.handleRuntime(
+      compaction("s1", "completed", "Summarized turns 1-5."),
+    );
+    const updates = toolUpdates(done);
+    expect(updates[0]).toEqual({
       sessionUpdate: "tool_call",
       toolCallId: "devin-compaction-id-1",
       title: "Compact context",
@@ -366,11 +391,7 @@ describe("compaction lifecycle translation", () => {
       status: "in_progress",
       _meta: { lody: { activity: { version: 1, kind: "context_compaction" } } },
     });
-
-    const done = proxy.handleRuntime(
-      compaction("s1", "completed", "Summarized turns 1-5."),
-    );
-    expect(toolUpdate(done)).toEqual({
+    expect(updates[1]).toEqual({
       sessionUpdate: "tool_call_update",
       toolCallId: "devin-compaction-id-1",
       status: "completed",
@@ -443,16 +464,20 @@ describe("compaction lifecycle translation", () => {
       toRuntime: [cancel],
     });
 
-    expect(toolUpdate(proxy.handleRuntime(compaction("s1", "failed")))).toEqual(
-      {
-        sessionUpdate: "tool_call_update",
-        toolCallId: "devin-compaction-id-1",
-        status: "failed",
-        _meta: {
-          lody: { activity: { version: 1, kind: "context_compaction" } },
-        },
+    const failed = toolUpdates(proxy.handleRuntime(compaction("s1", "failed")));
+    expect(failed[0]).toMatchObject({
+      sessionUpdate: "tool_call",
+      toolCallId: "devin-compaction-id-1",
+      status: "in_progress",
+    });
+    expect(failed[1]).toEqual({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "devin-compaction-id-1",
+      status: "failed",
+      _meta: {
+        lody: { activity: { version: 1, kind: "context_compaction" } },
       },
-    );
+    });
 
     const display = {
       jsonrpc: "2.0",
@@ -505,16 +530,26 @@ describe("compaction lifecycle translation", () => {
 
     const a = proxy.handleRuntime(compaction("s1", "started"));
     const b = proxy.handleRuntime(compaction("s2", "started"));
-    expect(toolUpdate(a).toolCallId).toBe("devin-compaction-id-1");
-    expect(toolUpdate(b).toolCallId).toBe("devin-compaction-id-2");
+    expect(a).toEqual({ toClient: [], toRuntime: [] });
+    expect(b).toEqual({ toClient: [], toRuntime: [] });
 
-    const bDone = proxy.handleRuntime(compaction("s2", "completed", "B"));
-    expect(toolUpdate(bDone)).toMatchObject({
+    const bDone = toolUpdates(
+      proxy.handleRuntime(compaction("s2", "completed", "B")),
+    );
+    expect(bDone[0]).toMatchObject({
+      toolCallId: "devin-compaction-id-2",
+      status: "in_progress",
+    });
+    expect(bDone[1]).toMatchObject({
       toolCallId: "devin-compaction-id-2",
       status: "completed",
     });
-    const aDone = proxy.handleRuntime(compaction("s1", "failed"));
-    expect(toolUpdate(aDone)).toMatchObject({
+    const aDone = toolUpdates(proxy.handleRuntime(compaction("s1", "failed")));
+    expect(aDone[0]).toMatchObject({
+      toolCallId: "devin-compaction-id-1",
+      status: "in_progress",
+    });
+    expect(aDone[1]).toMatchObject({
       toolCallId: "devin-compaction-id-1",
       status: "failed",
     });
@@ -547,11 +582,12 @@ describe("compaction lifecycle translation", () => {
   });
 
   it.each([{ summary: undefined }, { summary: 42 }])(
-    "completes normally when summary is absent or non-string (%j)",
+    "manual /compact completes normally when summary is absent or non-string (%j)",
     ({ summary }) => {
       const proxy = newProxy();
       initialize(proxy);
       newSession(proxy, "s1");
+      compactPrompt(proxy, "s1");
       proxy.handleRuntime(compaction("s1", "started"));
       const update = toolUpdate(
         proxy.handleRuntime(compaction("s1", "completed", summary)),
@@ -563,6 +599,168 @@ describe("compaction lifecycle translation", () => {
       expect(update).not.toHaveProperty("content");
     },
   );
+
+  it("suppresses a burst of replayed no-summary compaction pairs", () => {
+    const proxy = newProxy();
+    initialize(proxy);
+    newSession(proxy, "s1");
+
+    for (let i = 0; i < 11; i++) {
+      expect(proxy.handleRuntime(compaction("s1", "started"))).toEqual({
+        toClient: [],
+        toRuntime: [],
+      });
+      expect(proxy.handleRuntime(compaction("s1", "completed"))).toEqual({
+        toClient: [],
+        toRuntime: [],
+      });
+    }
+    expect(proxy.handleRuntime(compaction("s1", "started"))).toEqual({
+      toClient: [],
+      toRuntime: [],
+    });
+    expect(proxy.handleRuntime(compaction("s1", "completed", "   "))).toEqual({
+      toClient: [],
+      toRuntime: [],
+    });
+
+    expect(proxy.handleRuntime(compaction("s1", "started"))).toEqual({
+      toClient: [],
+      toRuntime: [],
+    });
+    const updates = toolUpdates(
+      proxy.handleRuntime(compaction("s1", "completed", "real summary")),
+    );
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toMatchObject({
+      sessionUpdate: "tool_call",
+      status: "in_progress",
+    });
+    expect(updates[1]).toMatchObject({
+      sessionUpdate: "tool_call_update",
+      status: "completed",
+    });
+    expect(updates[0]?.toolCallId).toBe(updates[1]?.toolCallId);
+  });
+
+  it("disarms manual compaction when the next prompt is ordinary", () => {
+    const proxy = newProxy();
+    initialize(proxy);
+    newSession(proxy, "s1");
+    compactPrompt(proxy, "s1");
+    proxy.handleClient({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "session/prompt",
+      params: {
+        sessionId: "s1",
+        prompt: [{ type: "text", text: "continue" }],
+      },
+    });
+
+    expect(proxy.handleRuntime(compaction("s1", "started"))).toEqual({
+      toClient: [],
+      toRuntime: [],
+    });
+    expect(proxy.handleRuntime(compaction("s1", "completed"))).toEqual({
+      toClient: [],
+      toRuntime: [],
+    });
+  });
+
+  it.each(["session/load", "session/resume"])(
+    "disarms manual compaction when %s starts",
+    (method) => {
+      const proxy = newProxy();
+      initialize(proxy);
+      newSession(proxy, "s1");
+      compactPrompt(proxy, "s1");
+      proxy.handleClient({
+        jsonrpc: "2.0",
+        id: 6,
+        method,
+        params: { sessionId: "s1", cwd: "/w", mcpServers: [] },
+      });
+      proxy.handleRuntime({ jsonrpc: "2.0", id: 6, result: {} });
+      expect(proxy.handleRuntime(compaction("s1", "started"))).toEqual({
+        toClient: [],
+        toRuntime: [],
+      });
+    },
+  );
+
+  it("shows a hidden compaction if /compact arrives before its terminal", () => {
+    const proxy = newProxy();
+    initialize(proxy);
+    newSession(proxy, "s1");
+    expect(proxy.handleRuntime(compaction("s1", "started"))).toEqual({
+      toClient: [],
+      toRuntime: [],
+    });
+    compactPrompt(proxy, "s1");
+    const updates = toolUpdates(
+      proxy.handleRuntime(compaction("s1", "completed")),
+    );
+    expect(updates[0]).toMatchObject({
+      sessionUpdate: "tool_call",
+      status: "in_progress",
+    });
+    expect(updates[1]).toMatchObject({
+      sessionUpdate: "tool_call_update",
+      status: "completed",
+    });
+    expect(updates[0]?.toolCallId).toBe(updates[1]?.toolCallId);
+  });
+
+  it("disarms manual compaction when the prompt fails", () => {
+    const proxy = newProxy();
+    initialize(proxy);
+    newSession(proxy, "s1");
+    compactPrompt(proxy, "s1");
+    proxy.handleRuntime({
+      jsonrpc: "2.0",
+      id: 5,
+      error: { code: -32000, message: "prompt failed" },
+    });
+    expect(proxy.handleRuntime(compaction("s1", "started"))).toEqual({
+      toClient: [],
+      toRuntime: [],
+    });
+  });
+
+  it("recognizes only a single /compact text block as manual", () => {
+    for (const [text, armed] of [
+      [" /compact ", true],
+      ["/compact focus", true],
+      ["/compactx", false],
+    ] as const) {
+      const proxy = newProxy();
+      initialize(proxy);
+      newSession(proxy, "s1");
+      compactPrompt(proxy, "s1", text);
+      const started = proxy.handleRuntime(compaction("s1", "started"));
+      expect(started.toClient).toHaveLength(armed ? 1 : 0);
+    }
+
+    const proxy = newProxy();
+    initialize(proxy);
+    newSession(proxy, "s1");
+    proxy.handleClient({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/prompt",
+      params: {
+        sessionId: "s1",
+        prompt: [
+          { type: "text", text: "/" },
+          { type: "text", text: "compact" },
+        ],
+      },
+    });
+    expect(proxy.handleRuntime(compaction("s1", "started")).toClient).toEqual(
+      [],
+    );
+  });
 
   it.each(["session/load", "session/resume"])(
     "during %s replay no synthetic activity; success admits the session",
@@ -583,13 +781,21 @@ describe("compaction lifecycle translation", () => {
         toRuntime: [],
       });
       proxy.handleRuntime({ jsonrpc: "2.0", id: 3, result: {} });
-      const live = toolUpdate(proxy.handleRuntime(compaction("s2", "started")));
-      expect(live).toMatchObject({
+      expect(proxy.handleRuntime(compaction("s2", "started"))).toEqual({
+        toClient: [],
+        toRuntime: [],
+      });
+      const live = toolUpdates(
+        proxy.handleRuntime(compaction("s2", "completed", "live")),
+      );
+      expect(live[0]).toMatchObject({
         toolCallId: "devin-compaction-id-1",
         status: "in_progress",
       });
-      // close the activity so the next session starts clean
-      proxy.handleRuntime(compaction("s2", "completed"));
+      expect(live[1]).toMatchObject({
+        toolCallId: "devin-compaction-id-1",
+        status: "completed",
+      });
     },
   );
 
@@ -610,18 +816,17 @@ describe("compaction lifecycle translation", () => {
         toRuntime: [],
       });
       proxy.handleRuntime({ jsonrpc: "2.0", id: 3, result: {} });
-      const live = toolUpdate(
+      expect(
         proxy.handleRuntime(compaction("fresh-session", "started")),
+      ).toEqual({ toClient: [], toRuntime: [] });
+      const live = toolUpdates(
+        proxy.handleRuntime(compaction("fresh-session", "completed", "s")),
       );
-      expect(live).toMatchObject({
+      expect(live[0]).toMatchObject({
         toolCallId: "devin-compaction-id-1",
         status: "in_progress",
       });
-      expect(
-        toolUpdate(
-          proxy.handleRuntime(compaction("fresh-session", "completed", "s")),
-        ),
-      ).toMatchObject({
+      expect(live[1]).toMatchObject({
         toolCallId: "devin-compaction-id-1",
         status: "completed",
       });
@@ -644,6 +849,7 @@ describe("compaction lifecycle translation", () => {
       error: { code: -32000, message: "not found" },
     });
     // admitted session: error released the replay mark, so lifecycle translates
+    compactPrompt(proxy, "s-existing");
     expect(
       toolUpdate(proxy.handleRuntime(compaction("s-existing", "started"))),
     ).toMatchObject({ status: "in_progress" });
@@ -670,9 +876,13 @@ describe("compaction lifecycle translation", () => {
     const proxy = newProxy();
     initialize(proxy); // unnegotiated
     newSession(proxy, "s1");
+    expect(proxy.handleRuntime(compaction("s1", "started"))).toEqual({
+      toClient: [],
+      toRuntime: [],
+    });
     expect(
-      toolUpdate(proxy.handleRuntime(compaction("s1", "started"))),
-    ).toMatchObject({ status: "in_progress" });
+      toolUpdate(proxy.handleRuntime(compaction("s1", "completed", "done"))),
+    ).toMatchObject({ status: "completed" });
     // unrelated session/update rows still pass through verbatim
     const plain = {
       jsonrpc: "2.0",

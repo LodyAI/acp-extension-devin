@@ -72,6 +72,36 @@ function isResponse(message: JsonRpcMessage): message is JsonRpcResponse {
 interface PendingRequest {
   method: string;
   sessionId?: string;
+  manualCompaction?: boolean;
+}
+
+interface ActiveCompaction {
+  toolCallId: string;
+  shown: boolean;
+}
+
+function hasCompactionSummary(summary: unknown): summary is string {
+  return typeof summary === "string" && summary.trim().length > 0;
+}
+
+function isManualCompactionPrompt(params: unknown): boolean {
+  if (!isRecord(params) || !Array.isArray(params["prompt"])) return false;
+  let text: string | undefined;
+  for (const block of params["prompt"]) {
+    if (
+      !isRecord(block) ||
+      block["type"] !== "text" ||
+      typeof block["text"] !== "string"
+    ) {
+      return false;
+    }
+    const value = block["text"].trim();
+    if (!value) continue;
+    if (text !== undefined) return false;
+    text = value;
+  }
+  const command = contract.compactionManualCommand;
+  return text === command || text?.startsWith(`${command} `) === true;
 }
 
 /**
@@ -86,8 +116,10 @@ export class DevinAcpProxy {
   private readonly admitted = new Set<string>();
   /** sessions inside a session/load replay window: updates pass through. */
   private readonly replaying = new Set<string>();
-  /** admitted sessions with a live native compaction, keyed tool call id. */
-  private readonly activeCompactions = new Map<string, string>();
+  /** sessions whose next compaction started event belongs to a manual /compact prompt. */
+  private readonly manualCompactionArmed = new Set<string>();
+  /** admitted sessions with a live native compaction. */
+  private readonly activeCompactions = new Map<string, ActiveCompaction>();
   private negotiated = false;
   private readonly subagentOpts: DevinSubagentEventsOptions;
   private readonly newId: () => string;
@@ -106,7 +138,15 @@ export class DevinAcpProxy {
         isRecord(msg.params) && typeof msg.params["sessionId"] === "string"
           ? msg.params["sessionId"]
           : undefined;
-      this.pending.set(msg.id, { method: msg.method, sessionId });
+      const manualCompaction =
+        msg.method === "session/prompt" &&
+        sessionId !== undefined &&
+        isManualCompactionPrompt(msg.params);
+      this.pending.set(msg.id, {
+        method: msg.method,
+        sessionId,
+        manualCompaction,
+      });
 
       if (msg.method === "initialize") {
         const caps = isRecord(msg.params)
@@ -133,11 +173,20 @@ export class DevinAcpProxy {
         }
       }
 
+      if (msg.method === "session/prompt" && sessionId) {
+        if (manualCompaction) {
+          this.manualCompactionArmed.add(sessionId);
+        } else {
+          this.manualCompactionArmed.delete(sessionId);
+        }
+      }
+
       if (
         (msg.method === "session/load" || msg.method === "session/resume") &&
         sessionId
       ) {
         this.replaying.add(sessionId);
+        this.manualCompactionArmed.delete(sessionId);
       }
     }
     // Client responses to runtime reverse requests carry an id but no method;
@@ -197,6 +246,14 @@ export class DevinAcpProxy {
       };
       toClient.push({ ...msg, result });
       return { toClient, toRuntime: [] };
+    }
+
+    if (
+      pending?.manualCompaction &&
+      pending.sessionId &&
+      msg.error !== undefined
+    ) {
+      this.manualCompactionArmed.delete(pending.sessionId);
     }
 
     if (
@@ -319,60 +376,91 @@ export class DevinAcpProxy {
         return { toClient: [], toRuntime: [] };
       }
       const toolCallId = `devin-compaction-${this.newId()}`;
-      this.activeCompactions.set(sessionId, toolCallId);
+      const shown = this.manualCompactionArmed.delete(sessionId);
+      this.activeCompactions.set(sessionId, { toolCallId, shown });
+      if (!shown) return { toClient: [], toRuntime: [] };
       return {
-        toClient: [
-          {
-            jsonrpc: "2.0",
-            method: "session/update",
-            params: {
-              sessionId,
-              update: {
-                sessionUpdate: "tool_call",
-                toolCallId,
-                title: "Compact context",
-                kind: "other",
-                status: "in_progress",
-                _meta: { ...COMPACTION_ACTIVITY_META },
-              },
-            },
-          },
-        ],
+        toClient: [this.compactionStart(sessionId, toolCallId)],
         toRuntime: [],
       };
     }
 
-    const toolCallId = this.activeCompactions.get(sessionId);
+    const active = this.activeCompactions.get(sessionId);
     this.activeCompactions.delete(sessionId);
-    if (!toolCallId) {
+    if (!active) {
       return { toClient: [], toRuntime: [] };
     }
+    const manuallyArmed = this.manualCompactionArmed.delete(sessionId);
+    const summary = (params as Record<string, unknown>)[
+      contract.compactionSummaryField
+    ];
+    const terminal = this.compactionTerminal(
+      sessionId,
+      active.toolCallId,
+      status,
+      summary,
+    );
+    if (active.shown) {
+      return { toClient: [terminal], toRuntime: [] };
+    }
+    if (
+      !manuallyArmed &&
+      status === contract.compactionCompletedStatus &&
+      !hasCompactionSummary(summary)
+    ) {
+      return { toClient: [], toRuntime: [] };
+    }
+    return {
+      toClient: [this.compactionStart(sessionId, active.toolCallId), terminal],
+      toRuntime: [],
+    };
+  }
+
+  private compactionStart(
+    sessionId: string,
+    toolCallId: string,
+  ): JsonRpcNotification {
+    return {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId,
+          title: "Compact context",
+          kind: "other",
+          status: "in_progress",
+          _meta: { ...COMPACTION_ACTIVITY_META },
+        },
+      },
+    };
+  }
+
+  private compactionTerminal(
+    sessionId: string,
+    toolCallId: string,
+    status: string,
+    summary: unknown,
+  ): JsonRpcNotification {
     const update: Record<string, unknown> = {
       sessionUpdate: "tool_call_update",
       toolCallId,
       status,
       _meta: { ...COMPACTION_ACTIVITY_META },
     };
-    const summary = (params as Record<string, unknown>)[
-      contract.compactionSummaryField
-    ];
     if (
       status === contract.compactionCompletedStatus &&
-      typeof summary === "string"
+      hasCompactionSummary(summary)
     ) {
       update["content"] = [
         { type: "content", content: { type: "text", text: summary } },
       ];
     }
     return {
-      toClient: [
-        {
-          jsonrpc: "2.0",
-          method: "session/update",
-          params: { sessionId, update },
-        },
-      ],
-      toRuntime: [],
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId, update },
     };
   }
 

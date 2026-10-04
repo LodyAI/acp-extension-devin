@@ -21,6 +21,7 @@
     "compactionSummaryField": "summary",
     "compactionStartedStatus": "started",
     "compactionCompletedStatus": "completed",
-    "compactionFailedStatus": "failed"
+    "compactionFailedStatus": "failed",
+    "compactionManualCommand": "/compact"
   }
 }
