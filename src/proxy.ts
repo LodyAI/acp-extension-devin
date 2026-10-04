@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   LODY_SUBAGENT_EVENT_METHOD,
   supportsLodySubagentEvents,
@@ -12,6 +14,10 @@ import {
 
 const SUBAGENT_SUPPORT_META = contract.subagentSupportClientCapability;
 const SUBAGENT_EVENTS_CAPABILITY = { version: 1 } as const;
+const COMPACTION_CAPABILITY = { version: 1 } as const;
+const COMPACTION_ACTIVITY_META = {
+  lody: { activity: { version: 1, kind: "context_compaction" } },
+} as const;
 
 export type JsonRpcId = string | number;
 
@@ -66,13 +72,43 @@ function isResponse(message: JsonRpcMessage): message is JsonRpcResponse {
 interface PendingRequest {
   method: string;
   sessionId?: string;
+  manualCompaction?: boolean;
+}
+
+interface ActiveCompaction {
+  toolCallId: string;
+  shown: boolean;
+}
+
+function hasCompactionSummary(summary: unknown): summary is string {
+  return typeof summary === "string" && summary.trim().length > 0;
+}
+
+function isManualCompactionPrompt(params: unknown): boolean {
+  if (!isRecord(params) || !Array.isArray(params["prompt"])) return false;
+  let text: string | undefined;
+  for (const block of params["prompt"]) {
+    if (
+      !isRecord(block) ||
+      block["type"] !== "text" ||
+      typeof block["text"] !== "string"
+    ) {
+      return false;
+    }
+    const value = block["text"].trim();
+    if (!value) continue;
+    if (text !== undefined) return false;
+    text = value;
+  }
+  const command = contract.compactionManualCommand;
+  return text === command || text?.startsWith(`${command} `) === true;
 }
 
 /**
  * ACP-to-ACP proxy between Lody (client) and `devin acp` (runtime).
- * Negotiates Core subagent events and, for admitted root sessions, translates
- * Devin's run_subagent / sidekick wire into `_lody/subagents/event`
- * notifications. Unnegotiated or unadmitted traffic is forwarded verbatim.
+ * For admitted root sessions it translates native compaction lifecycle
+ * notifications into Core activities; subagent event translation additionally
+ * requires bilateral negotiation. Other ACP traffic is forwarded unchanged.
  */
 export class DevinAcpProxy {
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
@@ -80,11 +116,17 @@ export class DevinAcpProxy {
   private readonly admitted = new Set<string>();
   /** sessions inside a session/load replay window: updates pass through. */
   private readonly replaying = new Set<string>();
+  /** sessions whose next compaction started event belongs to a manual /compact prompt. */
+  private readonly manualCompactionArmed = new Set<string>();
+  /** admitted sessions with a live native compaction. */
+  private readonly activeCompactions = new Map<string, ActiveCompaction>();
   private negotiated = false;
   private readonly subagentOpts: DevinSubagentEventsOptions;
+  private readonly newId: () => string;
 
   constructor(opts: DevinSubagentEventsOptions = {}) {
     this.subagentOpts = opts;
+    this.newId = opts.newId ?? randomUUID;
   }
 
   handleClient(message: unknown): ProxyOutput {
@@ -96,7 +138,15 @@ export class DevinAcpProxy {
         isRecord(msg.params) && typeof msg.params["sessionId"] === "string"
           ? msg.params["sessionId"]
           : undefined;
-      this.pending.set(msg.id, { method: msg.method, sessionId });
+      const manualCompaction =
+        msg.method === "session/prompt" &&
+        sessionId !== undefined &&
+        isManualCompactionPrompt(msg.params);
+      this.pending.set(msg.id, {
+        method: msg.method,
+        sessionId,
+        manualCompaction,
+      });
 
       if (msg.method === "initialize") {
         const caps = isRecord(msg.params)
@@ -123,12 +173,20 @@ export class DevinAcpProxy {
         }
       }
 
+      if (msg.method === "session/prompt" && sessionId) {
+        if (manualCompaction) {
+          this.manualCompactionArmed.add(sessionId);
+        } else {
+          this.manualCompactionArmed.delete(sessionId);
+        }
+      }
+
       if (
-        this.negotiated &&
         (msg.method === "session/load" || msg.method === "session/resume") &&
         sessionId
       ) {
         this.replaying.add(sessionId);
+        this.manualCompactionArmed.delete(sessionId);
       }
     }
     // Client responses to runtime reverse requests carry an id but no method;
@@ -154,6 +212,9 @@ export class DevinAcpProxy {
     if (msg.method === "session/update" && isRecord(msg.params)) {
       return this.handleSessionUpdate(msg);
     }
+    if (msg.method === contract.compactionNotificationMethod) {
+      return this.handleCompactionNotification(msg);
+    }
     return { toClient: [msg], toRuntime: [] };
   }
 
@@ -175,12 +236,24 @@ export class DevinAcpProxy {
           ...agentCaps,
           _meta: {
             ...meta,
-            lody: { ...lody, subagentEvents: SUBAGENT_EVENTS_CAPABILITY },
+            lody: {
+              ...lody,
+              subagentEvents: SUBAGENT_EVENTS_CAPABILITY,
+              compaction: COMPACTION_CAPABILITY,
+            },
           },
         },
       };
       toClient.push({ ...msg, result });
       return { toClient, toRuntime: [] };
+    }
+
+    if (
+      pending?.manualCompaction &&
+      pending.sessionId &&
+      msg.error !== undefined
+    ) {
+      this.manualCompactionArmed.delete(pending.sessionId);
     }
 
     if (
@@ -265,6 +338,130 @@ export class DevinAcpProxy {
       toClient.push(...this.render(session, o));
     }
     return { toClient, toRuntime: [] };
+  }
+
+  /**
+   * Devin's private `_cognition.ai/compaction` lifecycle, rendered as a Core
+   * context-compaction activity on a synthetic tool call. The native lifecycle
+   * owns completion independently of the `/compact` prompt response. Only
+   * admitted sessions outside a replay window produce activity; replay and
+   * malformed or unknown-status rows pass through untouched.
+   */
+  private handleCompactionNotification(msg: JsonRpcNotification): ProxyOutput {
+    const params = msg.params;
+    const sessionId =
+      isRecord(params) &&
+      typeof params[contract.compactionSessionIdField] === "string" &&
+      params[contract.compactionSessionIdField]
+        ? (params[contract.compactionSessionIdField] as string)
+        : undefined;
+    const status = isRecord(params)
+      ? params[contract.compactionStatusField]
+      : undefined;
+    const known =
+      status === contract.compactionStartedStatus ||
+      status === contract.compactionCompletedStatus ||
+      status === contract.compactionFailedStatus;
+    if (
+      !sessionId ||
+      !known ||
+      !this.admitted.has(sessionId) ||
+      this.replaying.has(sessionId)
+    ) {
+      return { toClient: [msg], toRuntime: [] };
+    }
+
+    if (status === contract.compactionStartedStatus) {
+      if (this.activeCompactions.has(sessionId)) {
+        return { toClient: [], toRuntime: [] };
+      }
+      const toolCallId = `devin-compaction-${this.newId()}`;
+      const shown = this.manualCompactionArmed.delete(sessionId);
+      this.activeCompactions.set(sessionId, { toolCallId, shown });
+      if (!shown) return { toClient: [], toRuntime: [] };
+      return {
+        toClient: [this.compactionStart(sessionId, toolCallId)],
+        toRuntime: [],
+      };
+    }
+
+    const active = this.activeCompactions.get(sessionId);
+    this.activeCompactions.delete(sessionId);
+    if (!active) {
+      return { toClient: [], toRuntime: [] };
+    }
+    const manuallyArmed = this.manualCompactionArmed.delete(sessionId);
+    const summary = (params as Record<string, unknown>)[
+      contract.compactionSummaryField
+    ];
+    const terminal = this.compactionTerminal(
+      sessionId,
+      active.toolCallId,
+      status,
+      summary,
+    );
+    if (active.shown) {
+      return { toClient: [terminal], toRuntime: [] };
+    }
+    if (
+      !manuallyArmed &&
+      status === contract.compactionCompletedStatus &&
+      !hasCompactionSummary(summary)
+    ) {
+      return { toClient: [], toRuntime: [] };
+    }
+    return {
+      toClient: [this.compactionStart(sessionId, active.toolCallId), terminal],
+      toRuntime: [],
+    };
+  }
+
+  private compactionStart(
+    sessionId: string,
+    toolCallId: string,
+  ): JsonRpcNotification {
+    return {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId,
+          title: "Compact context",
+          kind: "other",
+          status: "in_progress",
+          _meta: { ...COMPACTION_ACTIVITY_META },
+        },
+      },
+    };
+  }
+
+  private compactionTerminal(
+    sessionId: string,
+    toolCallId: string,
+    status: string,
+    summary: unknown,
+  ): JsonRpcNotification {
+    const update: Record<string, unknown> = {
+      sessionUpdate: "tool_call_update",
+      toolCallId,
+      status,
+      _meta: { ...COMPACTION_ACTIVITY_META },
+    };
+    if (
+      status === contract.compactionCompletedStatus &&
+      hasCompactionSummary(summary)
+    ) {
+      update["content"] = [
+        { type: "content", content: { type: "text", text: summary } },
+      ];
+    }
+    return {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId, update },
+    };
   }
 
   private render(

@@ -17,6 +17,24 @@
 - stdout carries protocol only; diagnostics go to stderr. On connection close,
   end the child's stdin; propagate child error/exit codes and signals.
 
+## Maintenance workflow
+
+- Use feature branches and pull requests as the default delivery workflow.
+  Adapter maintainers own review and merging.
+- Before pushing, opening a PR, or updating main, present the changes and
+  verification results and obtain explicit approval from the user or
+  maintainer directing the task.
+- PR descriptions record the implementation rationale, validation scope, and
+  adapter/runtime versions. Review the full diff and complete the required
+  checks before merging.
+- Verify repository permissions and branch rules before choosing the merge
+  path. Confirm PR and mainline state through authoritative GitHub data.
+- Report implementation, commit, push, PR, and mainline status separately,
+  with the relevant commit IDs and PR links.
+- Before publishing commits or merges, verify that author and committer
+  identities are public-safe; use the approved noreply identity for
+  AI-assisted work.
+
 ## Subagent events
 
 - Translate the private subagent stream only after bilateral negotiation:
@@ -29,11 +47,31 @@
 - Sidekick runs are inferred (no wire lifecycle); never invent descriptions or
   summaries for them. `session/load` replay creates no runs.
 
+## Compaction
+
+- The native lifecycle owns completion independently of prompt responses: a
+  `/compact` ACK or a client cancel is not a terminal. Only `started`,
+  `completed` and `failed` on `_cognition.ai/compaction` drive the activity.
+- Emit optional activity metadata only from verified native data; never invent
+  duration, token counts, or failure reasons.
+- `session/load`/`session/resume` replay creates no live compaction activity.
+
 ## MCP
 
 - Forward `session/new` / `session/load` `mcpServers` verbatim. Devin
   `>=3000.11.1` accepts stdio, HTTP and SSE there; the adapter never writes an
   MCP configuration file.
+
+## Local working records
+
+- Optional `local-work/` holds checkout-local working records and evidence.
+  Exclude it through this checkout's Git `info/exclude`; never stage or publish
+  its contents. `CLAUDE.md` remains a symlink to this file.
+- When that directory exists, read `local-work/AGENTS.md` and
+  `local-work/STATUS.md` before resuming work, then follow their decision and
+  evidence links. Local notes supplement these public rules.
+- Public behavior and contributor-wide rules belong in tracked documentation;
+  local notes do not replace public contracts or approval.
 
 ## Tests
 

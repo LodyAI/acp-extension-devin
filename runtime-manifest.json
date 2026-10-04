@@ -14,6 +14,14 @@
     "rootAgentId": "root",
     "sidekickAgentId": "sidekick",
     "toolNameMeta": "cognition.ai/toolName",
-    "inferenceToolNameMeta": "cognition.ai/inferenceToolName"
+    "inferenceToolNameMeta": "cognition.ai/inferenceToolName",
+    "compactionNotificationMethod": "_cognition.ai/compaction",
+    "compactionSessionIdField": "sessionId",
+    "compactionStatusField": "status",
+    "compactionSummaryField": "summary",
+    "compactionStartedStatus": "started",
+    "compactionCompletedStatus": "completed",
+    "compactionFailedStatus": "failed",
+    "compactionManualCommand": "/compact"
   }
 }
