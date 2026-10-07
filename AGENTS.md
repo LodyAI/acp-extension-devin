@@ -56,6 +56,20 @@
   duration, token counts, or failure reasons.
 - `session/load`/`session/resume` replay creates no live compaction activity.
 
+## Usage accounting
+
+- Translate `usage_update` only for admitted sessions; replay and unadmitted
+  sessions produce no `_lody/session/usage_update`.
+- Keep Core buckets disjoint: Devin `inputTokens` includes cache reads AND
+  writes (`inputTokens = fresh + cachedRead + cachedWrite`; cachedWrite may be
+  absent, e.g. SWE-2), so subtract both before filling `inputTokens`. Never
+  fabricate `costUSD`;
+  unverified private cost meta passes through under `cognition.ai/*` keys.
+- Count each inference once across its untagged/context-tagged twins; skip
+  `run_subagent` child rows (they bill to the child's identity). Each new
+  counted row is a new accumulator operation, so cumulative `modelUsage` and
+  per-request `delta` stay consistent.
+
 ## MCP
 
 - Forward `session/new` / `session/load` `mcpServers` verbatim. Devin
