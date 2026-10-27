@@ -70,6 +70,17 @@
   counted row is a new accumulator operation, so cumulative `modelUsage` and
   per-request `delta` stay consistent.
 
+## Model capabilities
+
+- `_meta.lody.modelCapabilities` v1 entries are derived from Devin's own
+  model catalog cache (`model_configs_v6.*.bin` under the XDG cache `devin/cli`
+  directory), whose layout is pinned in `runtime-manifest.json`. The adapter
+  sends no extra requests and never writes that cache.
+- A declaration is published only when one cache file covers every model in
+  the session's `model` select and the derivation for the current model
+  matches the response's actual `thought_level`/`speed` options; otherwise the
+  response is forwarded unchanged.
+
 ## MCP
 
 - Forward `session/new` / `session/load` `mcpServers` verbatim. Devin

@@ -56,6 +56,7 @@ after bilateral negotiation. Other ACP traffic passes through.
 - Core `subagentEvents` v1, described below.
 - Core `compaction` v1, described below.
 - Core `usage` v1, described below.
+- Core `modelCapabilities` v1, described below.
 - MCP servers supplied by the client, forwarded verbatim.
 
 A dedicated Plan Mode translation is not implemented, and the adapter does
@@ -120,6 +121,24 @@ cumulative totals under a per-session `usageScopeId`. Rows replayed during
 Private cost fields (`totalCreditCost`, `totalAcuCost`) and
 `responseDimensions` pass through verbatim under their `cognition.ai` keys;
 the adapter never maps them into `costUSD` because the units are unverified.
+
+## Model capabilities
+
+Devin's own model catalog cache — `model_configs_v6.*.bin` under the XDG cache
+`devin/cli` directory — describes every model's effort ladder and fast-mode
+axis. When a `session/new`, `session/load`, `session/resume` or `session/fork`
+response describes a `model` select, the adapter reads the newest cache file
+covering all of its models synchronously and annotates the response with
+`result._meta.lody.modelCapabilities` `{ version: 1, models }`: `effortValues`
+is the model's `thought_level` ladder (`[]` when the model has none) and
+`fastMode` is true when its `speed` option offers `fast`. The derivation sends
+no requests to Devin and never writes the cache.
+
+A declaration is published only when one cache file covers every model in the
+select and the derivation for the session's current model matches the
+response's actual `thought_level`/`speed` options. Otherwise the response is
+forwarded unchanged, so a stale or missing cache degrades to no declaration
+rather than a wrong one.
 
 ## Compaction
 
