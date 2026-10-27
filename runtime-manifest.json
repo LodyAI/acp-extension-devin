@@ -30,6 +30,25 @@
     "usageCachedWriteTokensMeta": "cognition.ai/cachedWriteTokens",
     "usageTotalCreditCostMeta": "cognition.ai/totalCreditCost",
     "usageTotalAcuCostMeta": "cognition.ai/totalAcuCost",
-    "usageResponseDimensionsMeta": "cognition.ai/responseDimensions"
+    "usageResponseDimensionsMeta": "cognition.ai/responseDimensions",
+    "speedConfigId": "speed",
+    "speedFastValue": "fast",
+    "modelConfigCacheDir": "devin/cli",
+    "modelConfigCachePrefix": "model_configs_v6.",
+    "modelConfigCacheSuffix": ".bin",
+    "modelFamilyFastModeKey": "Fast Mode"
+  },
+  "modelConfigCacheProtobuf": {
+    "configs": 1,
+    "modelUid": 22,
+    "familyMetadata": 30,
+    "familyLabel": 1,
+    "entry": 2,
+    "entryKey": 1,
+    "entryValue": 2,
+    "order": 1,
+    "label": 2,
+    "controlType": 3,
+    "effortControlType": 1
   }
 }

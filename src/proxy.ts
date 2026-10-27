@@ -14,6 +14,19 @@ import {
 } from "./elicitation.js";
 import { privateWireContract as contract } from "./manifest.js";
 import {
+  defaultModelConfigCacheDir,
+  deriveControls,
+  loadCoveringCatalog,
+  type CatalogFileMemo,
+} from "./model-catalog.js";
+import {
+  modelControls,
+  optionValues,
+  sessionModelOption,
+  withModelCapabilities,
+  type AcpModelControls,
+} from "./model-capabilities.js";
+import {
   DevinSubagentEvents,
   type DevinSubagentEventsOptions,
   type SubagentOut,
@@ -85,6 +98,12 @@ interface PendingRequest {
   manualCompaction?: boolean;
 }
 
+/** Proxy construction options: subagent translation knobs plus an optional
+ * model catalog cache directory override (defaults to Devin's XDG path). */
+export interface DevinAcpProxyOptions extends DevinSubagentEventsOptions {
+  catalogDir?: string;
+}
+
 interface ActiveCompaction {
   toolCallId: string;
   shown: boolean;
@@ -120,7 +139,10 @@ function isManualCompactionPrompt(params: unknown): boolean {
  * notifications into Core activities; subagent event translation additionally
  * requires bilateral negotiation. When the client advertises
  * `_meta.lody.elicitation`, private elicitation hints are translated into the
- * Core elicitation contract. Other ACP traffic is forwarded unchanged.
+ * Core elicitation contract. Session responses that describe a `model`
+ * select are annotated with `_meta.lody.modelCapabilities` derived from
+ * Devin's own on-disk model catalog cache, with no extra wire traffic.
+ * Other ACP traffic is forwarded unchanged.
  */
 export class DevinAcpProxy {
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
@@ -134,6 +156,11 @@ export class DevinAcpProxy {
   /** admitted sessions with a live native compaction. */
   private readonly activeCompactions = new Map<string, ActiveCompaction>();
   private negotiated = false;
+  /** Devin's model catalog cache directory, injectable for tests. */
+  private readonly catalogDir: string;
+  private readonly catalogMemo: CatalogFileMemo = new Map();
+  /** catalog failures are reported once per process on stderr. */
+  private catalogDiagnosticLogged = false;
   /** client advertised _meta.lody.elicitation — translate private elicitation hints. */
   private lodyElicitation = false;
   /** elicitation/create request id -> injected custom-answer companion fields. */
@@ -144,9 +171,10 @@ export class DevinAcpProxy {
   private readonly subagentOpts: DevinSubagentEventsOptions;
   private readonly newId: () => string;
 
-  constructor(opts: DevinSubagentEventsOptions = {}) {
+  constructor(opts: DevinAcpProxyOptions = {}) {
     this.subagentOpts = opts;
     this.newId = opts.newId ?? randomUUID;
+    this.catalogDir = opts.catalogDir ?? defaultModelConfigCacheDir();
   }
 
   handleClient(message: unknown): ProxyOutput {
@@ -289,32 +317,14 @@ export class DevinAcpProxy {
 
     if (
       pending?.method === "session/new" ||
-      pending?.method === "session/fork"
+      pending?.method === "session/fork" ||
+      pending?.method === "session/load" ||
+      pending?.method === "session/resume"
     ) {
-      if (isRecord(msg.result) && typeof msg.result["sessionId"] === "string") {
-        this.admit(msg.result["sessionId"]);
-        this.usages
-          .get(msg.result["sessionId"])
-          ?.observeConfigOptions(msg.result["configOptions"]);
-      }
-    } else if (
-      (pending?.method === "session/load" ||
-        pending?.method === "session/resume") &&
-      pending.sessionId
-    ) {
-      this.replaying.delete(pending.sessionId);
-      if (msg.result !== undefined && msg.error === undefined) {
-        this.admit(pending.sessionId);
-        if (isRecord(msg.result)) {
-          this.usages
-            .get(pending.sessionId)
-            ?.observeConfigOptions(msg.result["configOptions"]);
-        }
-      }
-    } else if (
-      pending?.method === "session/set_config_option" &&
-      pending.sessionId
-    ) {
+      return this.handleSessionResponse(msg, pending);
+    }
+
+    if (pending?.method === "session/set_config_option" && pending.sessionId) {
       if (isRecord(msg.result)) {
         this.usages
           .get(pending.sessionId)
@@ -336,6 +346,114 @@ export class DevinAcpProxy {
 
     toClient.push(msg);
     return { toClient, toRuntime: [] };
+  }
+
+  /**
+   * Runtime response to a session-establishment request. A successful response
+   * that describes a `model` select is annotated with the model capabilities
+   * derived from Devin's on-disk catalog cache — synchronously, with no wire
+   * traffic — whenever the derivation cross-checks against the response's own
+   * options; anything else is forwarded unchanged.
+   */
+  private handleSessionResponse(
+    msg: JsonRpcResponse,
+    pending: PendingRequest,
+  ): ProxyOutput {
+    if (msg.error === undefined && isRecord(msg.result)) {
+      const models = this.deriveModelCapabilities(msg.result);
+      if (models !== undefined) {
+        msg = { ...msg, result: withModelCapabilities(msg.result, models) };
+      }
+    }
+    this.postSessionResponse(msg, pending);
+    return { toClient: [msg], toRuntime: [] };
+  }
+
+  /**
+   * `_meta.lody.modelCapabilities` v1 entries for the model values in the
+   * response's `model` select, derived from the newest catalog cache file
+   * covering all of them. Published only when the current model's derived
+   * controls match the response's actual `thought_level`/`speed` options;
+   * otherwise — or on any catalog read/parse failure — undefined so the
+   * response passes through unchanged.
+   */
+  private deriveModelCapabilities(
+    result: Record<string, unknown>,
+  ): Record<string, AcpModelControls> | undefined {
+    const modelOption = sessionModelOption(result);
+    const current = modelOption?.["currentValue"];
+    if (!modelOption || typeof current !== "string") return undefined;
+    const ids = optionValues(modelOption);
+    if (ids.length === 0) return undefined;
+    const actual = modelControls(result["configOptions"], current);
+    if (!actual) return undefined;
+    try {
+      const catalog = loadCoveringCatalog(
+        this.catalogDir,
+        ids,
+        this.catalogMemo,
+      );
+      if (!catalog) {
+        this.logCatalogDiagnostic(
+          "no model_configs_v6 file covers the session's model select",
+        );
+        return undefined;
+      }
+      const models: Record<string, AcpModelControls> = {};
+      for (const id of ids) models[id] = deriveControls(catalog, id);
+      const expected = models[current];
+      if (
+        expected === undefined ||
+        (expected.effortValues ?? []).join("\n") !==
+          (actual.effortValues ?? []).join("\n") ||
+        (expected.fastMode ?? false) !== (actual.fastMode ?? false)
+      ) {
+        this.logCatalogDiagnostic(
+          "model catalog derivation does not match the session's options",
+        );
+        return undefined;
+      }
+      return models;
+    } catch (error) {
+      this.logCatalogDiagnostic(
+        `model catalog read failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+  }
+
+  private logCatalogDiagnostic(message: string) {
+    if (this.catalogDiagnosticLogged) return;
+    this.catalogDiagnosticLogged = true;
+    console.error(`Devin ACP adapter: ${message}`);
+  }
+
+  /**
+   * Admission, replay release and usage tracking for a session response.
+   */
+  private postSessionResponse(
+    msg: JsonRpcResponse,
+    pending: PendingRequest,
+  ): void {
+    if (pending.method === "session/new" || pending.method === "session/fork") {
+      if (isRecord(msg.result) && typeof msg.result["sessionId"] === "string") {
+        this.admit(msg.result["sessionId"]);
+        this.usages
+          .get(msg.result["sessionId"])
+          ?.observeConfigOptions(msg.result["configOptions"]);
+      }
+      return;
+    }
+    if (pending.sessionId === undefined) return;
+    this.replaying.delete(pending.sessionId);
+    if (msg.result !== undefined && msg.error === undefined) {
+      this.admit(pending.sessionId);
+      if (isRecord(msg.result)) {
+        this.usages
+          .get(pending.sessionId)
+          ?.observeConfigOptions(msg.result["configOptions"]);
+      }
+    }
   }
 
   private handleRuntimeRequest(msg: JsonRpcRequest): ProxyOutput {

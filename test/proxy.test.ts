@@ -259,6 +259,31 @@ describe("runtime manifest", () => {
     expect(contract.usageResponseDimensionsMeta).toBe(
       "cognition.ai/responseDimensions",
     );
+    expect(contract.speedConfigId).toBe("speed");
+    expect(contract.speedFastValue).toBe("fast");
+    expect(contract.modelConfigCacheDir).toBe("devin/cli");
+    expect(contract.modelConfigCachePrefix).toBe("model_configs_v6.");
+    expect(contract.modelConfigCacheSuffix).toBe(".bin");
+    expect(contract.modelFamilyFastModeKey).toBe("Fast Mode");
+  });
+
+  it("pins the model catalog cache protobuf field numbers", () => {
+    const protobuf = (
+      manifest as { modelConfigCacheProtobuf: Record<string, number> }
+    ).modelConfigCacheProtobuf;
+    expect(protobuf).toEqual({
+      configs: 1,
+      modelUid: 22,
+      familyMetadata: 30,
+      familyLabel: 1,
+      entry: 2,
+      entryKey: 1,
+      entryValue: 2,
+      order: 1,
+      label: 2,
+      controlType: 3,
+      effortControlType: 1,
+    });
   });
 });
 
