@@ -42,7 +42,7 @@ Tests assert against these values.
 
 The manifest declares Devin 3000.11.1 as the minimum supported version; from
 that version Devin accepts stdio, HTTP and SSE MCP servers in session requests.
-The pinned and end-to-end validated version is 3000.11.3.
+The pinned and end-to-end validated version is 3000.12.28.
 
 ## Capabilities
 
@@ -144,7 +144,7 @@ rather than a wrong one.
 
 Devin's `_cognition.ai/compaction` notifications become Core context-compaction activities on standard ACP `tool_call` and `tool_call_update` messages. Native `started`, `completed` and `failed` states drive the lifecycle, and native summaries are retained in the activity details.
 
-The native `compact` command is available through the standard ACP prompt path. Its response can arrive before compaction finishes; the native notifications determine completion. Manual compaction, automatic compaction, and cancellation have been verified on Devin 3000.11.3. Manual compaction has also been verified in the Lody UI.
+The native `compact` command is available through the standard ACP prompt path. Its response can arrive before compaction finishes; the native notifications determine completion. Manual compaction, automatic compaction, and cancellation have been verified on Devin 3000.12.28. Manual compaction has also been verified in the Lody UI.
 
 ## MCP
 
@@ -153,7 +153,7 @@ verbatim. Devin supports stdio, Streamable HTTP and SSE servers in these
 requests, so the adapter needs no MCP-specific translation and never writes an
 MCP configuration file.
 
-Through the adapter on Devin 3000.11.3:
+Through the adapter on Devin 3000.12.28:
 
 - stdio, Streamable HTTP and SSE servers each completed real tool calls, and
   configured HTTP/SSE request headers reached the server;
@@ -182,5 +182,5 @@ cancellation, and verbatim forwarding of non-empty stdio, HTTP and SSE MCP
 configurations in `session/new` and `session/load`, with and without subagent
 negotiation.
 
-The end-to-end MCP results above were observed on Devin 3000.11.3. They do not
+The end-to-end MCP results above were observed on Devin 3000.12.28. They do not
 establish behavior on other runtime versions or real-provider quality.

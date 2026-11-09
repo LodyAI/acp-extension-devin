@@ -1,7 +1,7 @@
 {
   "officialRuntime": {
     "package": "devin",
-    "version": "3000.11.3",
+    "version": "3000.12.28",
     "minimumSupportedVersion": "3000.11.1"
   },
   "privateWireContract": {
