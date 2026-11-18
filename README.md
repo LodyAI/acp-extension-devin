@@ -42,7 +42,7 @@ Tests assert against these values.
 
 The manifest declares Devin 3000.11.1 as the minimum supported version; from
 that version Devin accepts stdio, HTTP and SSE MCP servers in session requests.
-The pinned and end-to-end validated version is 3000.12.28.
+The pinned runtime version is 3000.14.30821. The end-to-end observations below were collected on 3000.12.28; they are historical evidence, not acceptance of the current pin.
 
 ## Capabilities
 
