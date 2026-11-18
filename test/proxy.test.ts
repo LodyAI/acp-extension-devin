@@ -211,7 +211,7 @@ describe("runtime manifest", () => {
   it("pins the official Devin runtime", () => {
     expect(manifest.officialRuntime).toEqual({
       package: "devin",
-      version: "3000.12.28",
+      version: "3000.14.30821",
       minimumSupportedVersion: "3000.11.1",
     });
   });
