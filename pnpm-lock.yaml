@@ -11,8 +11,8 @@ importers:
         specifier: 1.5.0
         version: 1.5.0(zod@4.6.5)
       acp-extension-core:
-        specifier: 0.1.9
-        version: 0.1.9(zod@4.6.5)
+        specifier: 0.4.0
+        version: 0.4.0(zod@4.6.5)
     devDependencies:
       "@types/node":
         specifier: ^22.20.4
@@ -559,10 +559,10 @@ packages:
         integrity: sha512-x6BDOd7dyo3PFLY3I9/HJ25X/6OurhGXk2/B9gOZNPF7XDVjeBK4k01lQE5uvDpbuheErh91qYuE1E2OEjK3Rw==,
       }
 
-  acp-extension-core@0.1.9:
+  acp-extension-core@0.4.0:
     resolution:
       {
-        integrity: sha512-TH10B+4AfXDSjmvSNOOvAWfbDZeT5G8ngdilVjZ7RXvE4sw53IO/TzJokbzjIKaZzo51G4pGqElj9b9kPp7Rkg==,
+        integrity: sha512-sQVEwRPDC6sqhg5tanptQ5ymrWu6nZ3mZFFGcwbImuWsHN3lukvSQIajOoABt8aLh4OjeIg0VuEZmDT7AmZ+JQ==,
       }
 
   assertion-error@2.0.1:
@@ -1139,7 +1139,7 @@ snapshots:
       loupe: 3.2.1
       tinyrainbow: 2.0.0
 
-  acp-extension-core@0.1.9(zod@4.6.5):
+  acp-extension-core@0.4.0(zod@4.6.5):
     dependencies:
       "@agentclientprotocol/sdk": 1.5.0(zod@4.6.5)
     transitivePeerDependencies:

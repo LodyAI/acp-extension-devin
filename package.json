@@ -31,7 +31,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.5.0",
-    "acp-extension-core": "0.1.9"
+    "acp-extension-core": "0.4.0"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",
